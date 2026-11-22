@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql-master
+  labels:
+    app: mysql-master
+    tier: data
+spec:
+  serviceName: mysql-master
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql-master
+  template:
+    metadata:
+      labels:
+        app: mysql-master
+        tier: data
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      initContainers:
+        # 把模板渲染成真正的 init.sql（口令从 Secret 注入，模板里没有明文）
+        - name: render-init
+          image: busybox:1.36
+          command: ["sh", "/tpl/render-init.sh", "/tpl/master-init.sql.tpl", "/initdb/init.sql"]
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: mysql-secret, key: root-password }
+            - name: MYSQL_REPL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: mysql-secret, key: repl-password }
+            - name: MYSQL_APP_USERNAME
+              valueFrom:
+                secretKeyRef: { name: mysql-secret, key: app-username }
+            - name: MYSQL_APP_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: mysql-secret, key: app-password }
+          volumeMounts:
+            - name: tpl
+              mountPath: /tpl
+            - name: initdb
+              mountPath: /initdb
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          args:
+            - --server-id=1
+            - --log-bin=mysql-bin
+            - --binlog-format=ROW
+            - --binlog-expire-logs-seconds=604800
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_general_ci
+            - --skip-host-cache
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: mysql-secret, key: root-password }
+            - name: MYSQL_DATABASE
+              value: demo
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - name: mysql
+              containerPort: 3306
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
+            failureThreshold: 40
+            periodSeconds: 5
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\" --silent"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { cpu: "1", memory: 1Gi }
+      volumes:
+        - name: tpl
+          configMap:
+            name: mysql-master-init
+        - name: initdb
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-master
+  labels:
+    app: mysql-master
+spec:
+  # 数据服务给 Headless Service，符合 StatefulSet 的稳定网络标识
+  clusterIP: None
+  selector:
+    app: mysql-master
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql

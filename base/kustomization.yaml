@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# 初始化脚本以 ConfigMap 形式注入（内容模板化，口令由 initContainer 从 Secret 渲染）
+configMapGenerator:
+  - name: mysql-master-init
+    files:
+      - master-init.sql.tpl=sql/master-init.sql.tpl
+      - render-init.sh=sql/render-init.sh
+    options:
+      disableNameSuffixHash: true
+  - name: mysql-slave-init
+    files:
+      - slave-init.sh.tpl=sql/slave-init.sh.tpl
+      - render-init.sh=sql/render-init.sh
+    options:
+      disableNameSuffixHash: true
+
+resources:
+  - mysql-master.yaml
+  - mysql-slave.yaml
+  - redis.yaml
+  - backend.yaml
+  - frontend.yaml

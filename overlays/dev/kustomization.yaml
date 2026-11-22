@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: demo-dev
+
+resources:
+  - ../../base
+  - ingress.yaml
+
+# CI 只改这两行（tag = git 短提交号），其余交给 Kustomize 渲染
+images:
+  - name: harbor.local/demo/backend
+    newTag: "3"
+  - name: harbor.local/demo/frontend
+    newTag: "3"
+
+patches:
+  # 开发环境压到 2 副本，省内存
+  - target:
+      kind: Deployment
+      name: backend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+  - target:
+      kind: Deployment
+      name: frontend
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
