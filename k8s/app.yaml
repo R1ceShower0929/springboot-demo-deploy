@@ -268,7 +268,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: harbor.local/demo/backend:1
+          image: harbor.local/demo/backend:2
           imagePullPolicy: Always
           env:
             - name: MYSQL_MASTER_HOST
@@ -326,7 +326,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: harbor.local/demo/frontend:1
+          image: harbor.local/demo/frontend:2
           imagePullPolicy: Always
           ports:
             - containerPort: 80
