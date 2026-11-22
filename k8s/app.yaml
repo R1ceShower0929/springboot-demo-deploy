@@ -1,0 +1,346 @@
+# springboot-demo 部署清单（由 Argo CD 同步到 demo 命名空间）
+# 镜像 tag 由 Jenkins 在每次构建后自动改写
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-master-init
+  namespace: demo
+data:
+  init.sql: |
+    -- MySQL 主库初始化脚本，容器第一次启动时自动执行
+    CREATE DATABASE IF NOT EXISTS demo DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+    SET NAMES utf8mb4 COLLATE utf8mb4_general_ci;
+    USE demo;
+
+    CREATE TABLE IF NOT EXISTS t_user (
+        id          BIGINT       NOT NULL AUTO_INCREMENT COMMENT '主键',
+        username    VARCHAR(32)  NOT NULL COMMENT '用户名',
+        email       VARCHAR(64)  DEFAULT NULL COMMENT '邮箱',
+        age         INT          DEFAULT NULL COMMENT '年龄',
+        create_time DATETIME     DEFAULT NULL COMMENT '创建时间',
+        update_time DATETIME     DEFAULT NULL COMMENT '更新时间',
+        deleted     TINYINT      NOT NULL DEFAULT 0 COMMENT '逻辑删除：0 正常 1 已删',
+        PRIMARY KEY (id),
+        KEY idx_username (username)
+    ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COMMENT = '用户表';
+
+    INSERT INTO t_user (username, email, age, create_time, update_time, deleted) VALUES
+    ('张三', 'zhangsan@example.com', 28, NOW(), NOW(), 0),
+    ('李四', 'lisi@example.com',     32, NOW(), NOW(), 0),
+    ('王五', 'wangwu@example.com',   25, NOW(), NOW(), 0),
+    ('赵六', 'zhaoliu@example.com',  41, NOW(), NOW(), 0),
+    ('钱七', 'qianqi@example.com',   19, NOW(), NOW(), 0);
+
+    -- 主从复制账号（从库用它来拉 binlog）
+    CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED WITH mysql_native_password BY 'repl123456';
+    GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO 'repl'@'%';
+    FLUSH PRIVILEGES;
+    -- 应用专用账号：故意不给 SUPER/FILE 等全局权限，
+    -- 这样它在从库（read_only=ON）上执行写操作会被 ERROR 1290 拒绝
+    CREATE USER IF NOT EXISTS 'demo'@'%' IDENTIFIED WITH mysql_native_password BY 'demo123456';
+    GRANT SELECT, INSERT, UPDATE, DELETE ON demo.* TO 'demo'@'%';
+    FLUSH PRIVILEGES;
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-slave-init
+  namespace: demo
+data:
+  01-replication.sh: |
+    #!/bin/bash
+    # 从库初始化：等主库就绪 -> 从最早的 binlog 起点建立复制（这样建库/建表/种子数据都会重放）
+    # -> 打开只读，防止误写从库
+    set -e
+
+    echo "[slave] waiting for master ..."
+    until mysqladmin ping -h mysql-master -uroot -proot123456 --silent 2>/dev/null; do
+      sleep 2
+    done
+    echo "[slave] master is ready"
+
+    # 关键：取主库第一个 binlog 文件，从 pos=4 开始重放。
+    # 不指定 SOURCE_LOG_FILE/POS 时，CHANGE REPLICATION 默认从"当前 binlog 末尾"开始，
+    # 初始化阶段创建的库、表和种子数据永远同步不过来。
+    FIRST_LOG=$(mysql -h mysql-master -uroot -proot123456 -N -e "SHOW BINARY LOGS" 2>/dev/null | head -1 | awk '{print $1}')
+    echo "[slave] replay binlog from ${FIRST_LOG}:4"
+
+    mysql -uroot -proot123456 <<SQL
+    CHANGE REPLICATION SOURCE TO
+      SOURCE_HOST='mysql-master',
+      SOURCE_PORT=3306,
+      SOURCE_USER='repl',
+      SOURCE_PASSWORD='repl123456',
+      SOURCE_LOG_FILE='${FIRST_LOG}',
+      SOURCE_LOG_POS=4,
+      GET_SOURCE_PUBLIC_KEY=1;
+    START REPLICA;
+    SQL
+
+    # 等复制线程真正跑起来
+    for i in $(seq 1 30); do
+      status=$(mysql -uroot -proot123456 -e "SHOW REPLICA STATUS\G" 2>/dev/null || true)
+      if echo "$status" | grep -q "Replica_IO_Running: Yes" && echo "$status" | grep -q "Replica_SQL_Running: Yes"; then
+        echo "[slave] replication running"
+        break
+      fi
+      sleep 2
+    done
+
+    # 复制建好后把从库设为只读（复制线程有 SUPER 权限，仍可写入）
+    # 只读由 replica.cnf 中的 read_only=ON + 应用账号无 SUPER 权限共同保证
+    echo "[slave] replication configured (read_only from replica.cnf)"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-master
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql-master
+  template:
+    metadata:
+      labels:
+        app: mysql-master
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          args:
+            - --server-id=1
+            - --log-bin=mysql-bin
+            - --binlog-format=ROW
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_general_ci
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: root123456
+            - name: MYSQL_DATABASE
+              value: demo
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -proot123456"]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            failureThreshold: 20
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d/01-init.sql
+              subPath: init.sql
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init
+          configMap:
+            name: mysql-master-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-master
+  namespace: demo
+spec:
+  selector:
+    app: mysql-master
+  ports:
+    - port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-slave
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql-slave
+  template:
+    metadata:
+      labels:
+        app: mysql-slave
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          args:
+            - --server-id=2
+            - --log-bin=mysql-bin
+            - --binlog-format=ROW
+            - --character-set-server=utf8mb4
+            - --collation-server=utf8mb4_general_ci
+            - --read-only=ON
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: root123456
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - containerPort: 3306
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d/01-replication.sh
+              subPath: 01-replication.sh
+      volumes:
+        - name: data
+          emptyDir: {}
+        - name: init
+          configMap:
+            name: mysql-slave-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-slave
+  namespace: demo
+spec:
+  selector:
+    app: mysql-slave
+  ports:
+    - port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["redis-server", "--appendonly", "yes"]
+          ports:
+            - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: demo
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: harbor.local/demo/backend:1
+          imagePullPolicy: Always
+          env:
+            - name: MYSQL_MASTER_HOST
+              value: mysql-master
+            - name: MYSQL_MASTER_PORT
+              value: "3306"
+            - name: MYSQL_SLAVE_HOST
+              value: mysql-slave
+            - name: MYSQL_SLAVE_PORT
+              value: "3306"
+            - name: MYSQL_USER
+              value: demo
+            - name: MYSQL_PASSWORD
+              value: demo123456
+            - name: REDIS_HOST
+              value: redis
+            - name: REDIS_PORT
+              value: "6379"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /api/users/ping/datasource
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: demo
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: harbor.local/demo/frontend:1
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: demo
+spec:
+  type: NodePort
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30095
