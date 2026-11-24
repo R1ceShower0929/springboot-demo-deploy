@@ -14,8 +14,16 @@ kind: ClusterRole
 metadata:
   name: local-path-provisioner-role
 rules:
+  # 注意：provisioner 建卷是起一个 helper Pod 把目录建在宿主机上，
+  # 所以它必须能 create/delete Pod，只给 get/list/watch 会一直 ProvisioningFailed。
   - apiGroups: [""]
-    resources: ["nodes", "persistentvolumeclaims", "configmaps", "pods", "pods/log"]
+    resources: ["nodes", "persistentvolumeclaims", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]

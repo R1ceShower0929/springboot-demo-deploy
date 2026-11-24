@@ -25,6 +25,19 @@ spec:
         runAsGroup: 999
         fsGroup: 999
       initContainers:
+        # local-path 建卷时目录属主是 root，而容器以 uid 999 跑 mysqld，
+        # 先用 root 身份的 initContainer 把挂载卷 chown 给 999，否则初始化会 Permission denied。
+        - name: fix-permissions
+          image: busybox:1.36
+          securityContext:
+            runAsUser: 0
+          command: ["sh", "-c", "chown -R 999:999 /data && chmod 750 /data"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
         - name: render-init
           image: busybox:1.36
           command: ["sh", "/tpl/render-init.sh", "/tpl/slave-init.sh.tpl", "/initdb/init.sh"]
