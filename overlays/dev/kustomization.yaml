@@ -10,9 +10,9 @@ resources:
 # CI 只改这两行（tag = git 短提交号），其余交给 Kustomize 渲染
 images:
   - name: harbor.local/demo/backend
-    newTag: "3"
+    newTag: "bc556629"
   - name: harbor.local/demo/frontend
-    newTag: "3"
+    newTag: "bc556629"
 
 patches:
   # 开发环境压到 2 副本，省内存
