@@ -12,9 +12,9 @@ resources:
 # CI 会在这里写入新的 digest（见 ci/update-manifest.sh）
 images:
   - name: harbor.local/demo/backend
-    digest: sha256:fa683bd1ecd4f6dcd4f5beabb84fd2cc6dc7e1b7a7e160d4ac9dd7169c39776b
+    digest: sha256:eb75a727452904c3c28fde307bc24966292af5f39fa418d9fe5c2cf84e57e1c0
   - name: harbor.local/demo/frontend
-    digest: sha256:4761527e35f8990421b83451145bce3226998ef343da8082c471d793a2468100
+    digest: sha256:edd697a2e94c7e0dcd9f5aec5c6600132e5e4a3dc6cd2f8d18130e4d75e0cb0f
 
 patches:
   # 生产 3 副本
